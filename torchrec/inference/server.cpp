@@ -8,6 +8,7 @@
 
 #include <iostream>
 #include <memory>
+#include <vector>
 #include <string>
 
 #include "absl/flags/flag.h"
@@ -19,7 +20,10 @@
 #include <grpcpp/health_check_service_interface.h>
 
 #include <torch/nn/functional/activation.h>
+#include <torch/torch.h>
 #include <torch/script.h>
+
+#include <dlfcn.h>
 
 #ifdef BAZEL_BUILD
 #include "examples/protos/predictor.grpc.pb.h"
@@ -41,6 +45,31 @@ using predictor::FloatVec;
 using predictor::PredictionRequest;
 using predictor::PredictionResponse;
 using predictor::Predictor;
+
+bool load_fbgemm_libraries() {
+    std::vector<std::string> possible_paths = {
+        // 常见的FBGEMM-GPU库路径
+        "/opt/pytorch/lib/python3.12/site-packages/fbgemm_gpu/fbgemm_gpu_tbe_inference.so"
+    };
+    
+    for (const auto& path : possible_paths) {
+        void* handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_GLOBAL);
+        if (handle != nullptr) {
+            std::cout << "Successfully loaded FBGEMM library: " << path << std::endl;
+            
+            // // 尝试获取一些关键符号来验证加载
+            // void* symbol = dlsym(handle, "PyInit_fbgemm_gpu_py");
+            // if (symbol != nullptr) {
+            //     std::cout << "Found PyInit symbol, library loaded correctly" << std::endl;
+            //     return true;
+            // }
+            return true;
+        } else {
+            std::cout << "Failed to load: " << path << " Error: " << dlerror() << std::endl;
+        }
+    }
+    return false;
+}
 
 class PredictorServiceHandler final : public Predictor::Service {
  public:
@@ -136,6 +165,11 @@ int main(int argc, char** argv) {
   if (argc != 2) {
     std::cerr << "usage: ts-infer <path-to-exported-model>\n";
     return -1;
+  }
+
+  std::cout << "Loading FBGEMM libraries..." << std::endl;
+  if (!load_fbgemm_libraries()) {
+    std::cout << "Warning: Could not load FBGEMM libraries" << std::endl;
   }
 
   std::cout << "Loading model...\n";

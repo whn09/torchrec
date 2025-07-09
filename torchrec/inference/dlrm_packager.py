@@ -102,7 +102,7 @@ def main(argv: List[str]) -> None:
         sample_input=batch,
     )
 
-    script_module = DLRMPredictFactory(model_config).create_predict_module(world_size=1)
+    script_module = DLRMPredictFactory(model_config).create_predict_module(world_size=1, device="cuda")
 
     script_module.save(args.output_path)
     print(f"Package is saved to {args.output_path}")

@@ -208,9 +208,34 @@ class DLRMPredictFactory(PredictFactory):
         gm = torch.fx.GraphModule(sharded_model, graph)
 
         gm(batch)
-        scripted_gm = torch.jit.script(gm)
-        scripted_gm(batch)
-        return scripted_gm
+        # scripted_gm = torch.jit.script(gm)
+        # scripted_gm(batch)
+        # return scripted_gm
+        
+        # 使用 torch.jit.trace 而不是 torch.jit.script
+        print("使用 torch.jit.trace 导出模型...")
+        try:
+            with torch.no_grad():
+                # trace 模型
+                traced_model = torch.jit.trace(gm, batch, check_trace=False, strict=False)  # strict=False 关键：允许字典等复杂输出
+                
+                # 验证 traced 模型
+                traced_output = traced_model(batch)
+                print(f"Traced model output: {traced_output}")
+                
+                return traced_model
+                
+        except Exception as e:
+            print(f"torch.jit.trace 失败: {e}")
+            print("回退到 torch.jit.script...")
+            
+            # 回退到 script 方法
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", 
+                    message="The TorchScript type system doesn't support instance-level annotations")
+                scripted_model = torch.jit.script(gm)
+                return scripted_model
 
     def batching_metadata(self) -> Dict[str, str]:
         return {
