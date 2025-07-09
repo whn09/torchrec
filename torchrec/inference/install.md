@@ -34,7 +34,8 @@ export FBGEMM_LIB=/opt/pytorch/lib/python3.12/site-packages/fbgemm_gpu/fbgemm_gp
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/pytorch/lib/python3.12/site-packages/torch/lib/
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/pytorch/lib/python3.12/site-packages/fbgemm_gpu/
 
-git clone https://github.com/pytorch/torchrec.git
+# git clone https://github.com/pytorch/torchrec.git
+git clone https://github.com/whn09/torchrec.git
 
 cd ~/torchrec/torchrec/inference/
 python dlrm_packager.py --output_path /tmp/model.pt
