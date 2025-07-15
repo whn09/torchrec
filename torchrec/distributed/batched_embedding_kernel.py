@@ -31,6 +31,7 @@ import torch
 import torch.distributed as dist
 from fbgemm_gpu.split_table_batched_embeddings_ops_common import (
     BackendType,
+    EvictionPolicy,
     KVZCHParams,
 )
 from fbgemm_gpu.split_table_batched_embeddings_ops_inference import (
@@ -78,8 +79,14 @@ from torchrec.distributed.types import (
 )
 from torchrec.distributed.utils import append_prefix, none_throws
 from torchrec.modules.embedding_configs import (
+    CountBasedEvictionPolicy,
+    CountTimestampMixedEvictionPolicy,
     data_type_to_sparse_type,
+    FeatureL2NormBasedEvictionPolicy,
+    NoEvictionPolicy,
     pooling_type_to_pooling_mode,
+    TimestampBasedEvictionPolicy,
+    VirtualTableEvictionPolicy,
 )
 from torchrec.optim.fused import (
     EmptyFusedOptimizer,
@@ -201,6 +208,8 @@ def _populate_ssd_tbe_params(config: GroupedEmbeddingConfig) -> Dict[str, Any]:
 def _populate_zero_collision_tbe_params(
     tbe_params: Dict[str, Any],
     sharded_local_buckets: List[Tuple[int, int, int]],
+    config: GroupedEmbeddingConfig,
+    backend_type: BackendType,
 ) -> None:
     """
     Construct Zero Collision TBE params from config and fused params dict.
@@ -211,10 +220,85 @@ def _populate_zero_collision_tbe_params(
     ]
     bucket_sizes: List[int] = [size for _, _, size in sharded_local_buckets]
 
+    enabled = False
+    meta_header_lens = [0] * len(config.embedding_tables)
+    for i, table in enumerate(config.embedding_tables):
+        # virtual_table_eviction_policy won't be None in reality: https://fburl.com/code/864a0w0f
+        if table.virtual_table_eviction_policy is not None:
+            meta_header_lens[i] = (
+                table.virtual_table_eviction_policy.get_meta_header_len()
+            )
+            if not isinstance(table.virtual_table_eviction_policy, NoEvictionPolicy):
+                enabled = True
+    if enabled:
+        counter_thresholds = [0] * len(config.embedding_tables)
+        ttls_in_mins = [0] * len(config.embedding_tables)
+        counter_decay_rates = [0.0] * len(config.embedding_tables)
+        l2_weight_thresholds = [0.0] * len(config.embedding_tables)
+        eviction_strategy = -1
+        table_names = [table.name for table in config.embedding_tables]
+        l2_cache_size = tbe_params["l2_cache_size"]
+        for i, table in enumerate(config.embedding_tables):
+            policy_t = table.virtual_table_eviction_policy
+            if policy_t is not None:
+                if isinstance(policy_t, CountBasedEvictionPolicy):
+                    counter_thresholds[i] = policy_t.eviction_threshold
+                    counter_decay_rates[i] = policy_t.decay_rate
+                    if eviction_strategy == -1 or eviction_strategy == 1:
+                        eviction_strategy = 1
+                    else:
+                        raise ValueError(
+                            f"Do not support multiple eviction strategy in one tbe {eviction_strategy} and 1 for tables {table_names}"
+                        )
+                elif isinstance(policy_t, TimestampBasedEvictionPolicy):
+                    ttls_in_mins[i] = policy_t.eviction_ttl_mins
+                    if eviction_strategy == -1 or eviction_strategy == 0:
+                        eviction_strategy = 0
+                    else:
+                        raise ValueError(
+                            f"Do not support multiple eviction strategy in one tbe {eviction_strategy} and 0 for tables {table_names}"
+                        )
+                elif isinstance(policy_t, FeatureL2NormBasedEvictionPolicy):
+                    l2_weight_thresholds[i] = policy_t.eviction_threshold
+                    if eviction_strategy == -1 or eviction_strategy == 3:
+                        eviction_strategy = 3
+                    else:
+                        raise ValueError(
+                            f"Do not support multiple eviction strategy in one tbe {eviction_strategy} and 3 for tables {table_names}"
+                        )
+                elif isinstance(policy_t, CountTimestampMixedEvictionPolicy):
+                    counter_thresholds[i] = policy_t.eviction_threshold
+                    counter_decay_rates[i] = policy_t.decay_rate
+                    ttls_in_mins[i] = policy_t.eviction_ttl_mins
+                    if eviction_strategy == -1 or eviction_strategy == 2:
+                        eviction_strategy = 2
+                    else:
+                        raise ValueError(
+                            f"Do not support multiple eviction strategy in one tbe {eviction_strategy} and 2 for tables {table_names}"
+                        )
+                else:
+                    raise ValueError(
+                        f"Unsupported eviction policy {policy_t} for table {table.name}"
+                    )
+        eviction_policy = EvictionPolicy(
+            eviction_trigger_mode=2,  # 2 means mem_util based eviction
+            eviction_mem_threshold_gb=l2_cache_size,
+            eviction_strategy=eviction_strategy,
+            counter_thresholds=counter_thresholds,
+            ttls_in_mins=ttls_in_mins,
+            counter_decay_rates=counter_decay_rates,
+            l2_weight_thresholds=l2_weight_thresholds,
+            meta_header_lens=meta_header_lens,
+        )
+    else:
+        eviction_policy = EvictionPolicy(meta_header_lens=meta_header_lens)
+
     tbe_params["kv_zch_params"] = KVZCHParams(
         bucket_offsets=bucket_offsets,
         bucket_sizes=bucket_sizes,
-        enable_optimizer_offloading=False,
+        enable_optimizer_offloading=True,
+        backend_return_whole_row=(backend_type == BackendType.DRAM),
+        eviction_policy=eviction_policy,
     )
 
 
@@ -1318,7 +1402,9 @@ class ZeroCollisionKeyValueEmbedding(
                 self._config.embedding_tables, self._pg
             )
         )
-        _populate_zero_collision_tbe_params(ssd_tbe_params, self._bucket_spec)
+        _populate_zero_collision_tbe_params(
+            ssd_tbe_params, self._bucket_spec, config, backend_type
+        )
         compute_kernel = config.embedding_tables[0].compute_kernel
         embedding_location = compute_kernel_to_embedding_location(compute_kernel)
 
@@ -2124,7 +2210,9 @@ class ZeroCollisionKeyValueEmbeddingBag(
                 self._config.embedding_tables, self._pg
             )
         )
-        _populate_zero_collision_tbe_params(ssd_tbe_params, self._bucket_spec)
+        _populate_zero_collision_tbe_params(
+            ssd_tbe_params, self._bucket_spec, config, backend_type
+        )
         compute_kernel = config.embedding_tables[0].compute_kernel
         embedding_location = compute_kernel_to_embedding_location(compute_kernel)
 

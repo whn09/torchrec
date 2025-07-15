@@ -20,7 +20,7 @@ import logging
 import os
 import time
 import timeit
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, MISSING
 from enum import Enum
 from typing import (
     Any,
@@ -477,6 +477,14 @@ def cmd_conf(func: Callable) -> Callable:
         sig = inspect.signature(func)
         parser = argparse.ArgumentParser(func.__doc__)
 
+        # Add loglevel argument with current logger level as default
+        parser.add_argument(
+            "--loglevel",
+            type=str,
+            default=logging._levelToName[logger.level],
+            help="Set the logging level (e.g. info, debug, warning, error)",
+        )
+
         seen_args = set()  # track all --<name> we've added
 
         for _name, param in sig.parameters.items():
@@ -487,7 +495,8 @@ def cmd_conf(func: Callable) -> Callable:
             for f in fields(cls):
                 arg_name = f.name
                 if arg_name in seen_args:
-                    parser.error(f"Duplicate argument {arg_name}")
+                    logger.warning(f"WARNING: duplicate argument {arg_name}")
+                    continue
                 seen_args.add(arg_name)
 
                 ftype = f.type
@@ -500,8 +509,15 @@ def cmd_conf(func: Callable) -> Callable:
                         ftype = non_none[0]
                         origin = get_origin(ftype)
 
+                # Handle default_factory value
+                default_value = (
+                    f.default_factory()  # pyre-ignore [29]
+                    if f.default_factory is not MISSING
+                    else f.default
+                )
+
                 arg_kwargs = {
-                    "default": f.default,
+                    "default": default_value,
                     "help": f"({cls.__name__}) {arg_name}",
                 }
 
@@ -514,6 +530,7 @@ def cmd_conf(func: Callable) -> Callable:
                 parser.add_argument(f"--{arg_name}", **arg_kwargs)
 
         args = parser.parse_args()
+        logger.setLevel(logging.INFO)
 
         # Build the dataclasses
         kwargs = {}
@@ -521,7 +538,12 @@ def cmd_conf(func: Callable) -> Callable:
             cls = param.annotation
             if is_dataclass(cls):
                 data = {f.name: getattr(args, f.name) for f in fields(cls)}
-                kwargs[name] = cls(**data)  # pyre-ignore [29]
+                config_instance = cls(**data)  # pyre-ignore [29]
+                kwargs[name] = config_instance
+                logger.info(config_instance)
+
+        loglevel = logging._nameToLevel[args.loglevel.upper()]
+        logger.setLevel(loglevel)
 
         return func(**kwargs)
 

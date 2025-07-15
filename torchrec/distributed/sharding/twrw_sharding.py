@@ -134,12 +134,7 @@ class BaseTwRwEmbeddingSharding(EmbeddingSharding[C, F, T, W]):
         tables_per_rank: List[List[ShardedEmbeddingTable]] = [
             [] for _ in range(world_size)
         ]
-        peer_group = (
-            # pyre-ignore [6]
-            get_process_group_ranks(self._pg)
-            if self._is_2D_parallel
-            else None
-        )
+        peer_group = get_process_group_ranks(self._pg) if self._is_2D_parallel else None
         for info in sharding_infos:
             # Under 2D parallelism we transform rank to the logical ordering in a regular parallelism scheme
             rank = (
@@ -204,6 +199,7 @@ class BaseTwRwEmbeddingSharding(EmbeddingSharding[C, F, T, W]):
                         weight_init_max=info.embedding_config.weight_init_max,
                         weight_init_min=info.embedding_config.weight_init_min,
                         fused_params=info.fused_params,
+                        use_virtual_table=info.embedding_config.use_virtual_table,
                     )
                 )
 
